@@ -61,10 +61,10 @@ def _json_from_response(text: str) -> Dict[str, Any]:
 
 def _vision_call(client, model, prompt, pages):
     """
+def _vision_call(client, model, prompt, pages):
+    """
     Sends up to 3 drawing pages to the Groq vision model.
-
-    Groq Qwen 3.8 currently supports a maximum of 3 images
-    per request, so the calling functions batch pages.
+    Designed for the Free Plan's output-token limits.
     """
 
     if not pages:
@@ -103,7 +103,8 @@ def _vision_call(client, model, prompt, pages):
             }
         ],
         temperature=0,
-        max_completion_tokens=6000,
+        max_completion_tokens=900,
+        reasoning_effort="none",
     )
 
     return response.choices[0].message.content
