@@ -1,11 +1,11 @@
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from groq import Groq
 
 
 # ============================================================
-# Groq Client
+# GROQ CLIENT
 # ============================================================
 
 def _client(api_key: str) -> Groq:
@@ -13,13 +13,17 @@ def _client(api_key: str) -> Groq:
 
 
 # ============================================================
-# JSON Helpers
+# JSON PARSER
 # ============================================================
 
 def _json_from_response(text: str) -> Dict[str, Any]:
     """
-    Safely extract JSON from an LLM response.
-    Handles normal JSON and ```json fenced responses.
+    Convert an AI response into a Python dictionary.
+
+    Handles:
+    - normal JSON
+    - ```json ... ```
+    - responses containing extra text around JSON
     """
 
     if not text:
@@ -31,7 +35,7 @@ def _json_from_response(text: str) -> Dict[str, Any]:
     if text.startswith("```"):
         lines = text.splitlines()
 
-        if lines and lines[0].startswith("```"):
+        if lines and lines[0].strip().startswith("```"):
             lines = lines[1:]
 
         if lines and lines[-1].strip().startswith("```"):
@@ -39,7 +43,7 @@ def _json_from_response(text: str) -> Dict[str, Any]:
 
         text = "\n".join(lines).strip()
 
-    # Extract JSON object if extra text exists
+    # Extract JSON object from surrounding text
     start = text.find("{")
     end = text.rfind("}")
 
@@ -47,38 +51,70 @@ def _json_from_response(text: str) -> Dict[str, Any]:
         text = text[start:end + 1]
 
     try:
-        return json.loads(text)
+        result = json.loads(text)
+
     except json.JSONDecodeError as exc:
         raise ValueError(
             "AI response was not valid JSON.\n\n"
-            f"Raw response:\n{text[:5000]}"
+            "Raw AI response:\n"
+            f"{text[:5000]}"
         ) from exc
 
+    if not isinstance(result, dict):
+        raise ValueError("AI response JSON is not an object.")
+
+    return result
+
 
 # ============================================================
-# Vision Call
+# PAGE BATCHING
+# ============================================================
+
+def _page_batches(pages, batch_size=3):
+    """
+    Split PDF pages into batches.
+
+    Qwen vision requests are limited to a small number of
+    images, therefore we keep maximum 3 pages per request.
+    """
+
+    return [
+        pages[i:i + batch_size]
+        for i in range(0, len(pages), batch_size)
+    ]
+
+
+# ============================================================
+# VISION CALL
 # ============================================================
 
 def _vision_call(client, model, prompt, pages):
     """
-def _vision_call(client, model, prompt, pages):
-    """
-    Sends up to 3 drawing pages to the Groq vision model.
-    Designed for the Free Plan's output-token limits.
+    Send architectural drawing images to the vision model.
+
+    IMPORTANT:
+    max_tokens is intentionally kept below the current
+    Free-plan OTPM limit reported by Groq.
     """
 
     if not pages:
-        raise ValueError("No drawing pages were supplied.")
+        raise ValueError("No drawing pages supplied.")
 
-    content = [{"type": "text", "text": prompt}]
+    content = [
+        {
+            "type": "text",
+            "text": prompt,
+        }
+    ]
 
     for index, page in enumerate(pages, start=1):
+
         page_number = page.get("page_number", index)
 
         content.append(
             {
                 "type": "text",
-                "text": f"--- DRAWING PAGE {page_number} ---",
+                "text": f"DRAWING PAGE {page_number}",
             }
         )
 
@@ -103,18 +139,23 @@ def _vision_call(client, model, prompt, pages):
             }
         ],
         temperature=0,
-        max_completion_tokens=900,
-        reasoning_effort="none",
+        max_tokens=700,
     )
 
     return response.choices[0].message.content
 
 
 # ============================================================
-# Text / Reasoning Call
+# TEXT / REASONING CALL
 # ============================================================
 
 def _text_call(client, model, system, user):
+    """
+    Text-only call for QS reasoning and QA review.
+
+    Uses GPT-OSS 120B in the current application.
+    """
+
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -128,31 +169,15 @@ def _text_call(client, model, system, user):
             },
         ],
         temperature=0,
-        max_completion_tokens=6000,
+        max_tokens=1200,
     )
 
     return response.choices[0].message.content
 
 
 # ============================================================
-# Page Batching
-# ============================================================
-
-def _page_batches(pages, batch_size=3):
-    """
-    Split drawing pages into batches.
-
-    Qwen 3.8 supports max 3 images per request.
-    """
-
-    return [
-        pages[i:i + batch_size]
-        for i in range(0, len(pages), batch_size)
-    ]
-
-
-# ============================================================
-# AGENT 1 — DRAWING ANALYSIS
+# AGENT 1
+# DRAWING ANALYSIS
 # ============================================================
 
 def run_drawing_agent(
@@ -163,68 +188,65 @@ def run_drawing_agent(
     unit_system,
 ):
     """
-    Analyse architectural drawing pages using vision AI.
+    Analyse architectural drawing pages.
 
-    Pages are processed in batches of maximum 3 images.
+    Vision model:
+        qwen/qwen3.8-27b
+
+    Output is deliberately compact because the Free Groq plan
+    has a strict output-token-per-minute limit.
     """
 
     client = _client(api_key)
 
-    batches = _page_batches(pages, batch_size=3)
+    batches = _page_batches(
+        pages,
+        batch_size=3,
+    )
 
     all_pages = []
     all_global_observations = []
     all_assumptions = []
 
-    for batch_number, batch in enumerate(batches, start=1):
+    for batch_number, batch in enumerate(
+        batches,
+        start=1,
+    ):
 
         prompt = f"""
-You are the Drawing Analysis Agent for a construction
-quantity-takeoff application.
+You are an architectural drawing analysis AI.
 
 Project: {project_name}
 Units: {unit_system}
 
-This is vision analysis batch {batch_number} of {len(batches)}.
+Analyse ONLY the supplied drawing images.
 
-Inspect EVERY supplied drawing page carefully.
-
-Identify ONLY information that can actually be observed from
-the supplied drawing images.
-
-Look for:
-
-- drawing/page type
-- title block information if readable
-- scale if explicitly visible
+Extract visible information about:
+- drawing type
+- title/block information if readable
 - floor/level
+- scale if explicitly printed
 - rooms/spaces
 - walls/partitions
-- doors and windows
+- doors
+- windows
 - stairs
 - visible dimensions
-- symbols
-- notes
-- grid lines
-- drawing references
-- drawing ambiguities
-- unreadable areas
+- notes/symbols
+- drawing uncertainties
 
-IMPORTANT RULES:
+STRICT RULES:
 
-1. NEVER invent a dimension.
-2. NEVER estimate a dimension just because it visually looks like a
-   certain size.
-3. If a value cannot be confidently read, write UNKNOWN.
-4. Preserve the actual drawing page number whenever available.
-5. Separate observed facts from assumptions.
-6. Do not manufacture scale information.
-7. Do not infer hidden geometry.
-8. Do not treat text generated by your own reasoning as drawing evidence.
-9. Return VALID JSON ONLY.
-10. Analyse every supplied page.
+1. Never invent dimensions.
+2. Never estimate dimensions from appearance.
+3. If information is unreadable, write UNKNOWN.
+4. Use the actual drawing page number.
+5. Do not assume a scale unless explicitly shown.
+6. Keep observations short.
+7. Return JSON ONLY.
+8. Do not write explanations outside JSON.
 
-Return exactly this JSON structure:
+Return:
 
 {{
   "drawing_summary": "",
@@ -250,24 +272,44 @@ Return exactly this JSON structure:
             batch,
         )
 
-        result = _json_from_response(response_text)
+        result = _json_from_response(
+            response_text
+        )
 
-        if isinstance(result.get("pages"), list):
-            all_pages.extend(result["pages"])
+        pages_result = result.get(
+            "pages",
+            [],
+        )
 
-        if isinstance(result.get("global_observations"), list):
-            all_global_observations.extend(
-                result["global_observations"]
+        if isinstance(pages_result, list):
+            all_pages.extend(
+                pages_result
             )
 
-        if isinstance(result.get("assumptions"), list):
+        observations = result.get(
+            "global_observations",
+            [],
+        )
+
+        if isinstance(observations, list):
+            all_global_observations.extend(
+                observations
+            )
+
+        assumptions = result.get(
+            "assumptions",
+            [],
+        )
+
+        if isinstance(assumptions, list):
             all_assumptions.extend(
-                result["assumptions"]
+                assumptions
             )
 
     return {
         "drawing_summary": (
-            f"Drawing analysed in {len(batches)} vision batches."
+            f"Architectural drawing analysed "
+            f"in {len(batches)} vision batches."
         ),
         "pages": all_pages,
         "global_observations": all_global_observations,
@@ -276,7 +318,8 @@ Return exactly this JSON structure:
 
 
 # ============================================================
-# AGENT 2 — MEASUREMENT EXTRACTION
+# AGENT 2
+# MEASUREMENT EXTRACTION
 # ============================================================
 
 def run_measurement_agent(
@@ -288,72 +331,75 @@ def run_measurement_agent(
     unit_system,
 ):
     """
-    Extract visible dimensions and directly calculable measurements.
+    Extract visible dimensions and directly calculable
+    measurements from architectural drawings.
 
-    Uses the drawing images again because measurement extraction
-    requires visual evidence.
+    Vision model:
+        qwen/qwen3.8-27b
     """
 
     client = _client(api_key)
 
-    batches = _page_batches(pages, batch_size=3)
+    batches = _page_batches(
+        pages,
+        batch_size=3,
+    )
 
     all_measurements = []
     all_unverified_items = []
 
-    # Keep the previous drawing analysis available to every batch.
     drawing_analysis_json = json.dumps(
         drawing_analysis,
         ensure_ascii=False,
     )
 
-    for batch_number, batch in enumerate(batches, start=1):
+    for batch_number, batch in enumerate(
+        batches,
+        start=1,
+    ):
 
         prompt = f"""
-You are the Measurement Extraction Agent for a construction
-quantity-takeoff application.
+You are a construction measurement extraction AI.
 
 Project: {project_name}
 Units: {unit_system}
 
-This is measurement extraction batch {batch_number}
-of {len(batches)}.
+Analyse the supplied architectural drawing images.
 
-Use the supplied drawing images plus the previous Drawing
-Analysis output.
+Extract ONLY:
 
-Your job is to extract ONLY measurements that are:
+1. Dimensions visibly written on drawings.
+2. Measurements directly calculable from visible dimensions.
 
-1. Clearly visible on the drawing, OR
-2. Directly calculable from clearly visible dimensions.
+Examples:
+- room length
+- room width
+- room area
+- wall length
+- door width/height
+- window width/height
+- stair dimensions
+- floor dimensions
 
-DO NOT guess.
+STRICT RULES:
 
-DO NOT estimate dimensions based only on visual appearance.
+- Never guess.
+- Never estimate from visual appearance.
+- Never invent dimensions.
+- Never use an assumed scale.
+- UNKNOWN values must remain UNKNOWN.
+- Every measurement needs a source page.
+- Preserve the original dimension text when readable.
+- Keep calculations simple.
+- Return JSON ONLY.
+- Keep the response concise.
 
-DO NOT convert an UNKNOWN value into a number.
+Confidence must be:
+HIGH
+MEDIUM
+LOW
 
-For every measurement provide:
-
-- item
-- value
-- unit
-- source_page
-- source_dimension_text if visible
-- confidence: HIGH/MEDIUM/LOW
-- calculation_note
-
-Examples of acceptable calculations:
-
-Room length × room width = floor area
-
-Wall length × wall height = wall area
-
-Door width × door height = door area
-
-But ONLY when the required dimensions are actually available.
-
-Return JSON ONLY:
+Return:
 
 {{
   "measurements": [
@@ -370,7 +416,7 @@ Return JSON ONLY:
   "unverified_items": []
 }}
 
-Previous Drawing Analysis:
+Previous drawing analysis:
 
 {drawing_analysis_json}
 """
@@ -382,16 +428,28 @@ Previous Drawing Analysis:
             batch,
         )
 
-        result = _json_from_response(response_text)
+        result = _json_from_response(
+            response_text
+        )
 
-        if isinstance(result.get("measurements"), list):
+        measurements = result.get(
+            "measurements",
+            [],
+        )
+
+        if isinstance(measurements, list):
             all_measurements.extend(
-                result["measurements"]
+                measurements
             )
 
-        if isinstance(result.get("unverified_items"), list):
+        unverified = result.get(
+            "unverified_items",
+            [],
+        )
+
+        if isinstance(unverified, list):
             all_unverified_items.extend(
-                result["unverified_items"]
+                unverified
             )
 
     return {
@@ -401,7 +459,8 @@ Previous Drawing Analysis:
 
 
 # ============================================================
-# AGENT 3 — QS TAKEOFF
+# AGENT 3
+# QS QUANTITY TAKEOFF
 # ============================================================
 
 def run_qs_agent(
@@ -414,33 +473,32 @@ def run_qs_agent(
     unit_system,
 ):
     """
-    Text/reasoning agent.
+    Prepare preliminary BOQ from extracted evidence.
 
-    This agent does NOT inspect images.
-    It works only from evidence extracted by the vision agents.
+    Text model:
+        openai/gpt-oss-120b
     """
 
     system = """
 You are a senior construction Quantity Surveyor.
 
-Prepare a PRELIMINARY quantity takeoff from evidence supplied
-by a drawing-analysis pipeline.
+Prepare a PRELIMINARY quantity takeoff using only the
+evidence provided by the drawing-analysis pipeline.
 
-STRICT EVIDENCE RULES:
+STRICT RULES:
 
-- Never invent dimensions.
-- Never convert UNKNOWN into a numeric quantity.
-- Never create missing dimensions.
-- Show formulas for calculated quantities.
-- Keep source page references.
-- Keep confidence levels.
-- If a quantity requires an assumption, explicitly state it.
-- Do not claim that the BOQ is final.
-- Do not silently assume wall heights, slab thicknesses,
-  openings, wastage, or construction details.
-- If evidence is insufficient, exclude the quantity or mark
-  it as requiring verification.
-- Return JSON only.
+1. Never invent dimensions.
+2. Never turn UNKNOWN into a number.
+3. Never create missing dimensions.
+4. Show formulas.
+5. Keep source pages.
+6. Keep confidence levels.
+7. State assumptions explicitly.
+8. Do not double count.
+9. Do not claim quantities are final.
+10. Exclude quantities without sufficient evidence.
+11. Return JSON ONLY.
+12. Keep output concise.
 """
 
     user = f"""
@@ -453,15 +511,15 @@ DRAWING ANALYSIS:
 MEASUREMENTS:
 {json.dumps(measurements, ensure_ascii=False)}
 
-QS METHODOLOGY / RAG CONTEXT:
+QS METHODOLOGY:
 {json.dumps(methodology, ensure_ascii=False)}
 
 Prepare a preliminary BOQ.
 
-Include measurable architectural/construction items ONLY where
-the supplied evidence supports the quantity.
+Only include items for which the supplied evidence supports
+a quantity.
 
-JSON schema:
+Use:
 
 {{
   "items": [
@@ -480,20 +538,25 @@ JSON schema:
   "assumptions": [],
   "excluded_items": []
 }}
+
+Return JSON ONLY.
 """
 
+    response_text = _text_call(
+        _client(api_key),
+        model,
+        system,
+        user,
+    )
+
     return _json_from_response(
-        _text_call(
-            _client(api_key),
-            model,
-            system,
-            user,
-        )
+        response_text
     )
 
 
 # ============================================================
-# AGENT 4 — REVIEW / QA
+# AGENT 4
+# QA / QC REVIEW
 # ============================================================
 
 def run_review_agent(
@@ -505,33 +568,37 @@ def run_review_agent(
     methodology,
 ):
     """
-    Independent text-based QA/QC review.
+    Independent QA/QC review.
+
+    Text model:
+        openai/gpt-oss-120b
     """
 
     system = """
-You are the independent QA/QC reviewer for an AI quantity-
-takeoff pipeline.
+You are an independent QA/QC reviewer for an AI construction
+quantity-takeoff system.
 
-Review the supplied evidence and preliminary BOQ.
+Review the preliminary BOQ against the supplied evidence.
 
 Check:
 
-1. arithmetic/formula consistency
-2. unsupported quantities
-3. missing source evidence
-4. low-confidence measurements
-5. double counting
-6. unreasonable assumptions
-7. quantities that should be marked UNABLE_TO_VERIFY
-8. whether the BOQ follows the supplied methodology
+1. arithmetic
+2. formulas
+3. unsupported quantities
+4. missing source pages
+5. low-confidence measurements
+6. double counting
+7. assumptions
+8. quantities requiring verification
 
 STRICT RULES:
 
 - Do not create new dimensions.
+- Do not create new quantities.
 - Do not repair missing evidence by guessing.
-- Do not introduce new quantities.
-- If evidence is insufficient, flag it.
-- Return JSON only.
+- Flag unsupported quantities.
+- Return JSON ONLY.
+- Keep the response concise.
 """
 
     user = f"""
@@ -543,7 +610,7 @@ MEASUREMENTS:
 
 {json.dumps(measurements, ensure_ascii=False)}
 
-BOQ:
+PRELIMINARY BOQ:
 
 {json.dumps(qs_result, ensure_ascii=False)}
 
@@ -551,7 +618,7 @@ METHODOLOGY:
 
 {json.dumps(methodology, ensure_ascii=False)}
 
-Return exactly:
+Return:
 
 {{
   "overall_status": "PASS|REVIEW_REQUIRED",
@@ -566,13 +633,17 @@ Return exactly:
   "critical_warnings": [],
   "review_notes": []
 }}
+
+Return JSON ONLY.
 """
 
-    return _json_from_response(
-        _text_call(
-            _client(api_key),
-            model,
-            system,
-            user,
-        )
+    response_text = _text_call(
+        _client(api_key),
+        model,
+        system,
+        user,
     )
+
+    return _json_from_response(
+        response_text
+        )
