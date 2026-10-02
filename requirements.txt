@@ -1,0 +1,7 @@
+streamlit>=1.40,<2
+groq>=0.11,<1
+PyMuPDF>=1.24,<2
+Pillow>=10,<12
+sentence-transformers>=3,<6
+faiss-cpu>=1.8,<2
+numpy>=1.26,<3
