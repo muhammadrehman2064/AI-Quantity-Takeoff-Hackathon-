@@ -32,7 +32,7 @@ def _json_from_response(text: str) -> Dict[str, Any]:
 
 # Groq free tier: qwen/qwen3.8-27b allows only ~1000 output tokens per minute.
 # Vision calls therefore keep output small. Text calls (gpt-oss) have more room.
-VISION_MAX_TOKENS = 800
+VISION_MAX_TOKENS = 500
 TEXT_MAX_TOKENS = 6000
 MAX_RETRIES = 4
 
