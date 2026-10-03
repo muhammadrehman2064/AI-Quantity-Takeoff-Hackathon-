@@ -1,4 +1,3 @@
-````python
 import json
 import re
 import time
@@ -699,4 +698,3 @@ UNABLE_TO_VERIFY
     )
 
     return _json_from_response(result)
-````
