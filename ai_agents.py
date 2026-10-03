@@ -166,7 +166,7 @@ def _json_from_response(text: str) -> Dict[str, Any]:
 # ============================================================
 
 # Keep vision output small because free-tier limits can be strict.
-VISION_MAX_TOKENS = 800
+VISION_MAX_TOKENS = 1600
 
 # Text agents have more room.
 TEXT_MAX_TOKENS = 6000
@@ -493,7 +493,7 @@ For every measurement provide:
 
 IMPORTANT:
 - Keep the list concise.
-- Maximum 20 measurements.
+- Maximum 12 measurements.
 - If no reliable measurement exists, return an empty measurements list.
 - Return JSON only.
 
